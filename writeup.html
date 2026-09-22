@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Meridian Orders API — Findings</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --text: #1a1a1a;
+    --muted: #5a5a5a;
+    --border: #e3e0d8;
+    --accent: #8a5a2b;
+    --code-bg: #f4f1ea;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17140f;
+      --text: #ece7dc;
+      --muted: #a49c8c;
+      --border: #332d22;
+      --accent: #d9a86c;
+      --code-bg: #211d16;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #17140f;
+    --text: #ece7dc;
+    --muted: #a49c8c;
+    --border: #332d22;
+    --accent: #d9a86c;
+    --code-bg: #211d16;
+  }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: Georgia, 'Times New Roman', serif;
+    line-height: 1.6;
+    margin: 0;
+    padding: 2.5rem 1.25rem 4rem;
+  }
+  main { max-width: 700px; margin: 0 auto; }
+  h1 {
+    font-size: 1.5rem;
+    margin-bottom: 0.1rem;
+  }
+  .byline { color: var(--muted); font-size: 0.92rem; margin-bottom: 2rem; }
+  h2 {
+    font-size: 1.05rem;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--accent);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.4rem;
+    margin-top: 2.4rem;
+  }
+  h3 { font-size: 1rem; margin-bottom: 0.3rem; }
+  ol, ul { padding-left: 1.3rem; }
+  li { margin-bottom: 1rem; }
+  .worst {
+    background: var(--code-bg);
+    border-left: 3px solid var(--accent);
+    padding: 0.15rem 0.9rem;
+    margin-top: 0.4rem;
+  }
+  .answer {
+    font-size: 1.4rem;
+    font-weight: bold;
+    color: var(--accent);
+    margin: 0.8rem 0;
+  }
+  code, pre {
+    font-family: 'SF Mono', Consolas, monospace;
+    background: var(--code-bg);
+    border-radius: 4px;
+  }
+  code { padding: 0.1em 0.35em; font-size: 0.9em; }
+  pre {
+    padding: 1rem;
+    overflow-x: auto;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    border: 1px solid var(--border);
+  }
+  .meta { color: var(--muted); font-size: 0.85rem; }
+  .card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.1rem 1.3rem;
+    margin-bottom: 1.2rem;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Meridian Orders API — Findings</h1>
+  <div class="byline">Product Analyst Intern take-home &middot; Omanshu Bhatt</div>
+
+  <h2>Task 1 — Where the docs and the data disagree</h2>
+  <ol>
+    <li>
+      <strong>Monetary values aren't consistently integer cents.</strong> The docs say every amount is an integer in the smallest unit (<code>5470</code> = $54.70). Only <code>ord_1006</code> in <code>orders_page2.json</code> breaks this: its <code>subtotal</code>/<code>tax</code>/<code>shipping</code>/<code>total</code> (44.0, 3.63, 5.99, 53.62) are decimal dollars. A client dividing every total by 100 reads this order as $0.54 instead of $53.62 — a silent ~$53 undercount, no error thrown.
+      <div class="worst">This is the worst of the five — it doesn't error, return a null, or 404; it feeds a wrong number straight into a sum. The other four at least surface something a defensive reader would notice (unexpected value, missing field, mismatched status code).</div>
+    </li>
+    <li>
+      <strong><code>refunded</code> isn't a documented status.</strong> The docs list pending/shipped/delivered/cancelled; <code>ord_1003</code> returns <code>refunded</code>. Code written strictly against the docs has no branch for it, so a $102.33 order can be counted as live revenue.
+    </li>
+    <li>
+      <strong><code>customer.email</code> isn't always present.</strong> Docs say "always present," but <code>ord_1005</code> returns <code>email: null</code> (guest checkout). Anything keying off email — dedup, outreach, invoicing — breaks or mis-groups that customer.
+    </li>
+    <li>
+      <strong>A missing order returns 200, not 404.</strong> Docs promise a 404 when an order doesn't exist; <code>order_ord_9999.json</code>, the response for non-existent <code>ord_9999</code>, came back HTTP 200 with <code>{"order": null}</code>. Status-code handling won't catch this; the client reads fields off <code>null</code> and crashes.
+    </li>
+    <li>
+      <strong><code>has_more</code> contradicts <code>next_cursor</code>.</strong> <code>orders_page1.json</code> says <code>has_more: false</code>, yet returns a real <code>next_cursor</code>. A client trusting <code>has_more</code>, as instructed, stops after page 1 and silently misses the two orders on page 2.
+    </li>
+  </ol>
+
+  <h2>Task 2 — Total revenue</h2>
+  <p>Summing <code>total</code> across both pages, correcting <code>ord_1006</code> to $53.62 (a formatting bug, not a $0.54 order), and excluding refunded <code>ord_1003</code> since a refund reverses the sale:</p>
+  <div class="answer">$225.70</div>
+  <p class="meta">Including refunded orders would give $328.03 instead. Net-of-refunds is a real judgment call the docs should settle — is "revenue" gross bookings or net of refunds? Verified in <code>revenue_calc.py</code>, included alongside.</p>
+
+  <h2>Task 3 — Two things to write</h2>
+
+  <h3>Reply to Priya</h3>
+  <div class="card">
+    <p class="meta"><strong>Subject:</strong> Re: TICKET-4502 — found the gap</p>
+    <p>Hi Priya,</p>
+    <p>Found two things causing the mismatch. First, one order's amounts are in dollars instead of cents — everything else uses cents, e.g. $54.70 as <code>5470</code> — so if your sheet divides by 100 like the docs say, that order reads as $0.54 instead of $53.62, undercounting ~$53. Second, your sum includes a refunded order ($102.33); since it was refunded it shouldn't count as revenue, so a dashboard that nets refunds out would differ by ~$102.</p>
+    <p>Together that's ~$155 of the gap. I'd flag the cents/dollars formatting as an API bug on our end — it should be consistent — and for now manually exclude refunded orders and re-check any order whose total looks too small relative to its line items.</p>
+    <p>Happy to walk through the numbers if useful.</p>
+  </div>
+
+  <h3>Bug report</h3>
+  <div class="card">
+    <p><strong>Title:</strong> Order amounts inconsistently formatted — decimal dollars instead of integer cents</p>
+    <p><strong>Where:</strong> <code>GET /v1/orders</code> response, order <code>ord_1006</code> (page 2, <code>starting_after=cur_8f2a19bd</code>)</p>
+    <p><strong>What happens:</strong> <code>subtotal</code>/<code>tax</code>/<code>shipping</code>/<code>total</code> are <code>44.0</code>, <code>3.63</code>, <code>5.99</code>, <code>53.62</code> — decimal dollars. Every other order on both pages uses integer cents (e.g. <code>ord_1001.total = 5470</code> for $54.70), matching the docs' worked example.</p>
+    <p><strong>What should happen:</strong> All four fields should be integer cents — <code>4400</code>, <code>363</code>, <code>599</code>, <code>5362</code> — matching every other order and the documented format.</p>
+    <p><strong>Why it matters:</strong> A consumer following the documented contract (divide by 100) silently computes $0.5362 instead of $53.62. Nothing errors or falls out of range — the number is just wrong — and this directly caused the TICKET-4502 discrepancy.</p>
+    <p><strong>Suggested first step:</strong> Check what wrote this record for a missed <code>&times; 100</code> conversion, or a divergent code path for edge-case orders — <code>ord_1006</code> sits next to guest order <code>ord_1005</code>, which is also anomalous (<code>email: null</code>), so the same pipeline may be worth auditing end to end.</p>
+  </div>
+
+</main>
+</body>
+</html>
